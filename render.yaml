@@ -1,17 +1,16 @@
 services:
-  - type: worker
+  - type: web
     name: course-bot
     runtime: python
-    plan: starter            # $7/мес — у воркеров нет бесплатного тарифа
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    healthCheckPath: /
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.7
-      - key: DB_PATH
-        value: /data/users.db
       - key: BOT_TOKEN
-        sync: false          # Render спросит значение при создании
+        sync: false          # Render спросит значения при создании
       - key: CHANNEL_ID
         sync: false
       - key: CHANNEL_URL
@@ -20,7 +19,7 @@ services:
         sync: false
       - key: ADMIN_IDS
         sync: false
-    disk:
-      name: bot-data
-      mountPath: /data
-      sizeGB: 1              # $0.25/мес — тут живёт база, кто на каком уроке
+      - key: SHEET_URL
+        sync: false
+      - key: SECRET
+        sync: false
