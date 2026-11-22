@@ -42,6 +42,7 @@ SHEET_URL = os.environ["SHEET_URL"]              # адрес веб-прило�
 SECRET = os.environ["SECRET"]                    # общий пароль: таблица, /tick, webhook
 PUBLIC_URL = os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL")  # Render подставляет сам
 PORT = int(os.getenv("PORT", "10000"))
+PROTECT = os.getenv("PROTECT_CONTENT", "1") != "0"   # запрет пересылки и сохранения уроков
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
@@ -156,9 +157,9 @@ async def send_lesson(uid: int, idx: int):
     les = COURSE["lessons"][idx]
     await bot.send_message(uid, f"📚 <b>{html.escape(les['title'])}</b>")
     if les.get("source_message_id") and STORAGE_CHAT_ID:
-        await bot.copy_message(uid, STORAGE_CHAT_ID, les["source_message_id"])
+        await bot.copy_message(uid, STORAGE_CHAT_ID, les["source_message_id"], protect_content=PROTECT)
     if les.get("text"):
-        await bot.send_message(uid, les["text"])
+        await bot.send_message(uid, les["text"], protect_content=PROTECT)
 
 async def deliver_due(uid: int):
     """Отправляет этому пользователю всё, что уже пора отправить."""

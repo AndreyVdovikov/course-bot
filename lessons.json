@@ -1,12 +1,42 @@
 {
   "_как_заполнять": "delay_hours — через сколько часов ПОСЛЕ СТАРТА курса прийти уроку. source_message_id — номер поста с уроком в твоём закрытом канале-хранилище (узнать: перешли пост боту командой /id). Если source_message_id = null, бот отправит просто text.",
   "lessons": [
-    {"title": "Урок 1. С чего начать хендимен-бизнес в США", "delay_hours": 0,   "source_message_id": null, "text": "Тут будет урок 1"},
-    {"title": "Урок 2. Инструмент: что купить в первую очередь", "delay_hours": 24,  "source_message_id": null, "text": "Тут будет урок 2"},
-    {"title": "Урок 3. Лицензии, страховка, оформление",         "delay_hours": 48,  "source_message_id": null, "text": "Тут будет урок 3"},
-    {"title": "Урок 4. Откуда брать первых клиентов",            "delay_hours": 72,  "source_message_id": null, "text": "Тут будет урок 4"},
-    {"title": "Урок 5. Как считать цену и не работать в ноль",   "delay_hours": 96,  "source_message_id": null, "text": "Тут будет урок 5"},
-    {"title": "Урок 6. Как вырасти из одиночки в бизнес",        "delay_hours": 120, "source_message_id": null, "text": "Тут будет урок 6"}
+    {
+      "title": "Урок 1. С чего начать хендимен-бизнес в США",
+      "delay_hours": 0,
+      "source_message_id": 3,
+      "text": null
+    },
+    {
+      "title": "Урок 2. Инструмент: что купить в первую очередь",
+      "delay_hours": 24,
+      "source_message_id": null,
+      "text": "Тут будет урок 2"
+    },
+    {
+      "title": "Урок 3. Лицензии, страховка, оформление",
+      "delay_hours": 48,
+      "source_message_id": null,
+      "text": "Тут будет урок 3"
+    },
+    {
+      "title": "Урок 4. Откуда брать первых клиентов",
+      "delay_hours": 72,
+      "source_message_id": null,
+      "text": "Тут будет урок 4"
+    },
+    {
+      "title": "Урок 5. Как считать цену и не работать в ноль",
+      "delay_hours": 96,
+      "source_message_id": null,
+      "text": "Тут будет урок 5"
+    },
+    {
+      "title": "Урок 6. Как вырасти из одиночки в бизнес",
+      "delay_hours": 120,
+      "source_message_id": null,
+      "text": "Тут будет урок 6"
+    }
   ],
   "final_offer": {
     "delay_hours_after_last": 24,
