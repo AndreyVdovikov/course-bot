@@ -10,32 +10,32 @@
     {
       "title": "Урок 2. Инструмент: что купить в первую очередь",
       "delay_hours": 24,
-      "source_message_id": null,
-      "text": "Тут будет урок 2"
+      "source_message_id": 4,
+      "text": null
     },
     {
       "title": "Урок 3. Лицензии, страховка, оформление",
       "delay_hours": 48,
-      "source_message_id": null,
-      "text": "Тут будет урок 3"
+      "source_message_id": 5,
+      "text": null
     },
     {
       "title": "Урок 4. Откуда брать первых клиентов",
       "delay_hours": 72,
-      "source_message_id": null,
-      "text": "Тут будет урок 4"
+      "source_message_id": 6,
+      "text": null
     },
     {
       "title": "Урок 5. Как считать цену и не работать в ноль",
       "delay_hours": 96,
-      "source_message_id": null,
-      "text": "Тут будет урок 5"
+      "source_message_id": 7,
+      "text": null
     },
     {
       "title": "Урок 6. Как вырасти из одиночки в бизнес",
       "delay_hours": 120,
-      "source_message_id": null,
-      "text": "Тут будет урок 6"
+      "source_message_id": 8,
+      "text": null
     }
   ],
   "final_offer": {
