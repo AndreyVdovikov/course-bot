@@ -17,6 +17,7 @@ import html
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -58,7 +59,7 @@ COURSE = load_course()
 
 # ---------- хранилище: Google Таблица ----------
 FIELDS = ["user_id", "username", "first_name", "joined_at", "started_at",
-          "next_lesson", "paused", "offer_sent", "blocked", "reminded"]
+          "next_lesson", "paused", "offer_sent", "blocked", "reminded", "source"]
 INT_FIELDS = {"user_id", "joined_at", "started_at", "next_lesson", "paused", "offer_sent", "blocked", "reminded"}
 USERS: dict[int, dict] = {}   # копия таблицы в памяти, грузится при каждом старте сервера
 http: aiohttp.ClientSession | None = None
@@ -104,10 +105,11 @@ async def upd(uid, **kw):
     USERS[uid].update(kw)
     await sheet_call({"action": "upsert", "user": USERS[uid]})
 
-async def add_user(uid, username, first_name):
+async def add_user(uid, username, first_name, source=None):
     USERS[uid] = {"user_id": uid, "username": username, "first_name": first_name,
                   "joined_at": int(time.time()), "started_at": None, "next_lesson": 0,
-                  "paused": 0, "offer_sent": 0, "blocked": 0, "reminded": 0}
+                  "paused": 0, "offer_sent": 0, "blocked": 0, "reminded": 0,
+                  "source": source or "direct"}
     await sheet_call({"action": "upsert", "user": USERS[uid]})
 
 # ---------- тексты и кнопки ----------
@@ -240,12 +242,19 @@ async def resume_course(uid: int):
     await deliver_due(uid)
 
 # ---------- хендлеры пользователя ----------
+def clean_source(raw: str | None) -> str | None:
+    """Метка из ссылки t.me/bot?start=tiktok -> 'tiktok'."""
+    if not raw:
+        return None
+    src = re.sub(r"[^a-z0-9_-]", "", raw.strip().lower())[:40]
+    return src or None
+
 @dp.message(CommandStart())
-async def on_start(msg: Message):
+async def on_start(msg: Message, command: CommandObject):
     uid = msg.from_user.id
     u = get_user(uid)
     if not u:
-        await add_user(uid, msg.from_user.username, msg.from_user.first_name)
+        await add_user(uid, msg.from_user.username, msg.from_user.first_name, clean_source(command.args))
         u = get_user(uid)
     elif u["blocked"]:
         await upd(uid, blocked=0)
@@ -312,6 +321,14 @@ async def on_stats(msg: Message):
              f"💰 Дошли до оффера: {cnt(lambda u: u['offer_sent'])}", "", "Получили уроков:"]
     for i in range(len(COURSE["lessons"])):
         lines.append(f"  {i + 1}. {cnt(lambda u: u['next_lesson'] > i)}")
+    by_src: dict[str, list] = {}
+    for u in us:
+        by_src.setdefault(u.get("source") or "до меток", []).append(u)
+    lines.append("\nОткуда пришли (зашли → начали курс → дошли до оффера):")
+    for src, group in sorted(by_src.items(), key=lambda kv: -len(kv[1])):
+        st = sum(1 for u in group if u["started_at"])
+        of = sum(1 for u in group if u["offer_sent"])
+        lines.append(f"  {src}: {len(group)} → {st} → {of}")
     lines.append("\nПолный список — в Google Таблице.")
     await msg.answer("\n".join(lines))
 

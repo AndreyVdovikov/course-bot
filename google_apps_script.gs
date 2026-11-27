@@ -14,7 +14,7 @@ const BOT_URL = 'https://course-bot-gyja.onrender.com';  // адрес серв�
 
 const SHEET = 'users';
 const FIELDS = ['user_id', 'username', 'first_name', 'joined_at', 'started_at',
-                'next_lesson', 'paused', 'offer_sent', 'blocked', 'reminded'];
+                'next_lesson', 'paused', 'offer_sent', 'blocked', 'reminded', 'source'];
 const EXTRA = ['Пришёл', 'Начал курс', 'Уроков получено', 'Статус']; // для тебя, бот их не читает
 
 function sheet_() {
