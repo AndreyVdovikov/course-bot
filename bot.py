@@ -113,15 +113,37 @@ async def add_user(uid, username, first_name, source=None):
     await sheet_call({"action": "upsert", "user": USERS[uid]})
 
 # ---------- тексты и кнопки ----------
-WELCOME = ("Привет, {name}! 👋\n\n"
-           "Здесь курс <b>«Хендимен-бизнес в США с нуля»</b> — {n} видео-уроков.\n\n"
-           "Курс <b>полностью бесплатный</b>: никаких оплат, карт и скрытых платежей. "
-           "Единственное условие — подписка на мой канал.\n\n"
-           "Уроки будут приходить сюда по одному в день.\n"
-           "Подпишись на канал и нажми «Я подписался ✅».")
+DIGITS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+def program_text() -> str:
+    lines = []
+    for i, les in enumerate(COURSE["lessons"]):
+        line = les.get("teaser") or les["title"].split(". ", 1)[-1]   # "Урок 2. Инструмент…" -> "Инструмент…"
+        head, sep, rest = line.partition(":")
+        text = f"<b>{html.escape(head)}:</b>{html.escape(rest)}" if sep else f"<b>{html.escape(line)}</b>"
+        num = DIGITS[i] if i < len(DIGITS) else f"{i + 1}."
+        lines.append(f"{num} {text}")
+    return "\n".join(lines)
+
+def welcome_text(name: str) -> str:
+    n = len(COURSE["lessons"])
+    return (
+        f"Привет, {name}! 👋\n\n"
+        "Это <b>бесплатный курс «Хендимен-бизнес в США с нуля»</b> — первый шаг в сервисный бизнес. "
+        "Никаких оплат, карт и скрытых платежей.\n\n"
+        f"📚 <b>{n} видео-уроков, по одному в день</b> — приходят прямо сюда, в бот:\n\n"
+        f"{program_text()}\n\n"
+        "💵 <b>Сколько можно заработать.</b> Если делать по шагам, первые клиенты появляются уже в первую неделю — "
+        "это <b>$150–$1 000</b>. В первый месяц новички выходят на <b>$2 000–$3 000</b>, дальше — "
+        "сколько готов работать.\n"
+        "<i>Цифры — ориентир, а не гарантия: результат зависит от тебя.</i>\n\n"
+        "Условие одно — подписка на мой канал, там я каждую неделю разбираю сервисный бизнес в США.\n\n"
+        "👇 Подпишись и нажми <b>«Я подписался ✅»</b> — первый урок придёт сразу."
+    )
+
 REMINDER = ("{name}, курс тебя ждёт 🙌\n\n"
             "Напоминаю: он <b>действительно бесплатный</b> — {n} видео-уроков о том, как запустить "
-            "хендимен-бизнес в США с нуля. Платить ничего не нужно.\n\n"
+            "хендимен-бизнес в США с нуля и найти первых клиентов уже в первую неделю. Платить ничего не нужно.\n\n"
             "Осталось одно: подписаться на канал и нажать «Я подписался ✅». "
             "Первый урок придёт сразу.")
 NOT_SUBSCRIBED = "Не вижу подписки 🤔 Подпишись на канал и нажми кнопку ещё раз."
@@ -293,7 +315,7 @@ async def on_start(msg: Message, command: CommandObject):
                              "Следующий урок придёт по расписанию. Все полученные — /lessons")
         return
     name = html.escape(msg.from_user.first_name or "друг")
-    await msg.answer(WELCOME.format(name=name, n=len(COURSE["lessons"])), reply_markup=sub_kb())
+    await msg.answer(welcome_text(name), reply_markup=sub_kb())
 
 @dp.callback_query(F.data == "check_sub")
 async def on_check(cb: CallbackQuery):
