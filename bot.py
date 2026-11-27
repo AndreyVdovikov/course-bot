@@ -139,7 +139,14 @@ def sub_kb():
 
 SOURCES = [("tiktok", "TikTok"), ("insta", "Instagram"), ("yt", "YouTube"),
            ("fb", "Facebook"), ("tg", "Telegram"), ("friend", "Друг посоветовал"), ("other", "Другое")]
-SOURCE_Q = "Кстати, откуда ты узнал о курсе? Нажми один вариант — это поможет мне делать больше полезного 🙏"
+def bonus_ready() -> bool:
+    b = COURSE.get("source_bonus") or {}
+    return bool(b.get("source_message_id") and STORAGE_CHAT_ID)
+
+def source_question() -> str:
+    q = "Кстати, откуда ты узнал о курсе? Нажми один вариант"
+    return q + (" — и я пришлю тебе бонус: прайс-лист хендимена в США 🎁" if bonus_ready() else
+                " — это поможет мне делать больше полезного 🙏")
 
 def source_kb():
     rows, row = [], []
@@ -304,7 +311,7 @@ async def on_check(cb: CallbackQuery):
         await start_course(uid)
         if needs_source_question(get_user(uid)):
             await asyncio.sleep(2)
-            await cb.message.answer(SOURCE_Q, reply_markup=source_kb())
+            await cb.message.answer(source_question(), reply_markup=source_kb())
     elif u["paused"]:
         await cb.message.answer(RESUMED)
         await resume_course(uid)
@@ -320,13 +327,22 @@ async def on_source(cb: CallbackQuery):
     if not u or key not in labels:
         await cb.answer()
         return
-    if needs_source_question(u):
+    first_answer = needs_source_question(u)
+    if first_answer:
         await upd(uid, source=key)
     await cb.answer("Спасибо!")
     try:
-        await cb.message.edit_text(f"Спасибо! Записал: {labels[key]} 👍")
+        await cb.message.edit_text(f"Записал: {labels[key]} 👍")
     except TelegramBadRequest:
         pass
+    if first_answer and bonus_ready():
+        b = COURSE["source_bonus"]
+        try:
+            if b.get("text"):
+                await bot.send_message(uid, b["text"])
+            await bot.copy_message(uid, STORAGE_CHAT_ID, b["source_message_id"], protect_content=PROTECT)
+        except TelegramForbiddenError:
+            await upd(uid, blocked=1)
 
 @dp.message(Command("lessons"))
 async def on_lessons(msg: Message):
