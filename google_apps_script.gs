@@ -9,12 +9,12 @@
 
 // ↓↓↓ ЗАПОЛНИ ↓↓↓
 const SECRET  = 'ПРИДУМАЙ_ПАРОЛЬ';                  // тот же, что SECRET на Render (латиница, цифры, _ и -)
-const BOT_URL = 'https://course-bot.onrender.com';  // адрес сервиса на Render
+const BOT_URL = 'https://course-bot-gyja.onrender.com';  // адрес сервиса на Render
 // ↑↑↑ ЗАПОЛНИ ↑↑↑
 
 const SHEET = 'users';
 const FIELDS = ['user_id', 'username', 'first_name', 'joined_at', 'started_at',
-                'next_lesson', 'paused', 'offer_sent', 'blocked'];
+                'next_lesson', 'paused', 'offer_sent', 'blocked', 'reminded'];
 const EXTRA = ['Пришёл', 'Начал курс', 'Уроков получено', 'Статус']; // для тебя, бот их не читает
 
 function sheet_() {

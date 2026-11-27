@@ -43,6 +43,8 @@ SECRET = os.environ["SECRET"]                    # общий пароль: та
 PUBLIC_URL = os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL")  # Render подставляет сам
 PORT = int(os.getenv("PORT", "10000"))
 PROTECT = os.getenv("PROTECT_CONTENT", "1") != "0"   # запрет пересылки и сохранения уроков
+REMIND_AFTER_H = float(os.getenv("REMIND_AFTER_HOURS", "2"))  # напомнить про подписку через N часов
+REMIND_MAX_AGE_H = 72   # тем, кто пришёл больше 3 дней назад, не напоминаем
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
@@ -56,8 +58,8 @@ COURSE = load_course()
 
 # ---------- хранилище: Google Таблица ----------
 FIELDS = ["user_id", "username", "first_name", "joined_at", "started_at",
-          "next_lesson", "paused", "offer_sent", "blocked"]
-INT_FIELDS = {"user_id", "joined_at", "started_at", "next_lesson", "paused", "offer_sent", "blocked"}
+          "next_lesson", "paused", "offer_sent", "blocked", "reminded"]
+INT_FIELDS = {"user_id", "joined_at", "started_at", "next_lesson", "paused", "offer_sent", "blocked", "reminded"}
 USERS: dict[int, dict] = {}   # копия таблицы в памяти, грузится при каждом старте сервера
 http: aiohttp.ClientSession | None = None
 
@@ -105,14 +107,21 @@ async def upd(uid, **kw):
 async def add_user(uid, username, first_name):
     USERS[uid] = {"user_id": uid, "username": username, "first_name": first_name,
                   "joined_at": int(time.time()), "started_at": None, "next_lesson": 0,
-                  "paused": 0, "offer_sent": 0, "blocked": 0}
+                  "paused": 0, "offer_sent": 0, "blocked": 0, "reminded": 0}
     await sheet_call({"action": "upsert", "user": USERS[uid]})
 
 # ---------- тексты и кнопки ----------
 WELCOME = ("Привет, {name}! 👋\n\n"
-           "Здесь бесплатный курс <b>«Хендимен-бизнес в США с нуля»</b> — {n} уроков.\n"
-           "Уроки будут приходить сюда по одному в день.\n\n"
-           "Чтобы получить доступ, подпишись на мой канал и нажми «Я подписался ✅».")
+           "Здесь курс <b>«Хендимен-бизнес в США с нуля»</b> — {n} видео-уроков.\n\n"
+           "Курс <b>полностью бесплатный</b>: никаких оплат, карт и скрытых платежей. "
+           "Единственное условие — подписка на мой канал.\n\n"
+           "Уроки будут приходить сюда по одному в день.\n"
+           "Подпишись на канал и нажми «Я подписался ✅».")
+REMINDER = ("{name}, курс тебя ждёт 🙌\n\n"
+            "Напоминаю: он <b>действительно бесплатный</b> — {n} видео-уроков о том, как запустить "
+            "хендимен-бизнес в США с нуля. Платить ничего не нужно.\n\n"
+            "Осталось одно: подписаться на канал и нажать «Я подписался ✅». "
+            "Первый урок придёт сразу.")
 NOT_SUBSCRIBED = "Не вижу подписки 🤔 Подпишись на канал и нажми кнопку ещё раз."
 STARTED = "Отлично, доступ открыт! 🚀 Первый урок уже летит."
 PAUSED = ("Ты отписался от канала, поэтому курс на паузе ⏸\n"
@@ -161,6 +170,24 @@ async def send_lesson(uid: int, idx: int):
     if les.get("text"):
         await bot.send_message(uid, les["text"], protect_content=PROTECT)
 
+async def remind_due(uid: int):
+    """Одно напоминание тем, кто нажал Start, но так и не подписался."""
+    u = get_user(uid)
+    if not u or u["started_at"] or u["blocked"] or u["reminded"]:
+        return
+    age_h = (time.time() - (u["joined_at"] or 0)) / 3600
+    if age_h < REMIND_AFTER_H or age_h > REMIND_MAX_AGE_H:
+        return
+    try:
+        name = html.escape(u["first_name"] or "Привет")
+        await bot.send_message(uid, REMINDER.format(name=name, n=len(COURSE["lessons"])), reply_markup=sub_kb())
+        await upd(uid, reminded=1)
+    except TelegramForbiddenError:
+        await upd(uid, blocked=1, reminded=1)
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+
+
 async def deliver_due(uid: int):
     """Отправляет этому пользователю всё, что уже пора отправить."""
     lessons = COURSE["lessons"]
@@ -196,6 +223,7 @@ async def deliver_all():
     async with deliver_lock:
         for uid in list(USERS):
             try:
+                await remind_due(uid)
                 await deliver_due(uid)
             except Exception:
                 log.exception("Ошибка при отправке пользователю %s", uid)
@@ -277,6 +305,8 @@ async def on_stats(msg: Message):
     cnt = lambda f: sum(1 for u in us if f(u))
     lines = [f"👥 Зашли в бота: {len(us)}",
              f"✅ Подписались и начали: {cnt(lambda u: u['started_at'])}",
+             f"🔔 Не подписались, получили напоминание: {cnt(lambda u: u['reminded'] and not u['started_at'])}",
+             f"↩️ Подписались после напоминания: {cnt(lambda u: u['reminded'] and u['started_at'])}",
              f"⏸ На паузе (отписались): {cnt(lambda u: u['paused'])}",
              f"🚫 Заблокировали бота: {cnt(lambda u: u['blocked'])}",
              f"💰 Дошли до оффера: {cnt(lambda u: u['offer_sent'])}", "", "Получили уроков:"]
