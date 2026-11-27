@@ -137,6 +137,24 @@ def sub_kb():
         [InlineKeyboardButton(text="Я подписался ✅", callback_data="check_sub")],
     ])
 
+SOURCES = [("tiktok", "TikTok"), ("insta", "Instagram"), ("yt", "YouTube"),
+           ("fb", "Facebook"), ("tg", "Telegram"), ("friend", "Друг посоветовал"), ("other", "Другое")]
+SOURCE_Q = "Кстати, откуда ты узнал о курсе? Нажми один вариант — это поможет мне делать больше полезного 🙏"
+
+def source_kb():
+    rows, row = [], []
+    for key, label in SOURCES:
+        row.append(InlineKeyboardButton(text=label, callback_data=f"src:{key}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def needs_source_question(u) -> bool:
+    """Спрашиваем, только если человек пришёл не по ссылке с меткой."""
+    return (u.get("source") or "direct") == "direct"
+
 def offer_kb():
     o = COURSE["final_offer"]
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=o["button_text"], url=o["button_url"])]])
@@ -284,11 +302,31 @@ async def on_check(cb: CallbackQuery):
     if not u["started_at"]:
         await cb.message.answer(STARTED)
         await start_course(uid)
+        if needs_source_question(get_user(uid)):
+            await asyncio.sleep(2)
+            await cb.message.answer(SOURCE_Q, reply_markup=source_kb())
     elif u["paused"]:
         await cb.message.answer(RESUMED)
         await resume_course(uid)
     else:
         await cb.message.answer("Подписка есть, курс идёт 👍")
+
+@dp.callback_query(F.data.startswith("src:"))
+async def on_source(cb: CallbackQuery):
+    uid = cb.from_user.id
+    key = cb.data.split(":", 1)[1]
+    labels = dict(SOURCES)
+    u = get_user(uid)
+    if not u or key not in labels:
+        await cb.answer()
+        return
+    if needs_source_question(u):
+        await upd(uid, source=key)
+    await cb.answer("Спасибо!")
+    try:
+        await cb.message.edit_text(f"Спасибо! Записал: {labels[key]} 👍")
+    except TelegramBadRequest:
+        pass
 
 @dp.message(Command("lessons"))
 async def on_lessons(msg: Message):
