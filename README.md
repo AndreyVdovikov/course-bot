@@ -52,6 +52,66 @@
 Метка — латиница, цифры, `_` и `-`, до 40 символов. Можно дробить: `tiktok_video12`, `fb_ads_nov`.
 Кто зашёл по ссылке без метки — бот после подписки спросит «Откуда ты узнал о курсе?» (кнопки TikTok / Instagram / YouTube / Facebook / Telegram / Друг / Другое) и запишет ответ; не ответил — останется `direct`; кто пришёл до появления меток — «до меток».
 
+## Оплата сообщества через Stripe
+
+После курса кнопка «Хочу в сообщество» (или команда `/join`) создаёт личную ссылку на оплату Stripe Checkout.
+Stripe сообщает боту об оплате через вебхук, бот записывает подписку в таблицу и присылает кнопку входа в закрытый чат.
+Вход — по заявке: бот одобряет её, только если подписка активна, так что пересланная ссылка чужому не поможет.
+Подписка отменена или не оплачена — бот убирает человека из чата и пишет ему, как вернуться.
+
+Пока `STRIPE_SECRET_KEY` не задан, всё работает по-старому (кнопка ведёт на `button_url`).
+
+### 1. Stripe Dashboard (сначала в тестовом режиме)
+1. **Product catalog → Add product**: «Сообщество мастеров», цена **$50, Recurring, Monthly**.
+   Скопируй ID цены `price_...` → `STRIPE_PRICE_ID`.
+2. **Developers → API keys → Create restricted key** (ключ `rk_...` надёжнее основного `sk_...`). Права:
+   - Checkout Sessions — **Write**
+   - Customer portal — **Write**
+   - Subscriptions — **Read**
+   - Customers — **Read**
+   - всё остальное — None.
+
+   Ключ → `STRIPE_SECRET_KEY` в Render. В код и GitHub ключи не вставлять.
+3. **Settings → Billing → Customer portal** → включи портал (отмена подписки, смена карты, чеки) и сохрани.
+   Без этого `/subscription` не откроет страницу управления.
+4. **Developers → Webhooks → Add endpoint**:
+   - URL: `https://course-bot-xxxx.onrender.com/stripe/webhook`
+   - события: `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+     `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`,
+     `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`, `radar.early_fraud_warning.created`
+   - **Signing secret** `whsec_...` → `STRIPE_WEBHOOK_SECRET`.
+
+### 2. Telegram
+- Создай закрытую группу (или канал) сообщества, добавь бота **админом** с правами
+  «Пригласительные ссылки / добавлять участников» и «Блокировать участников».
+- ID чата (`-100...`) → `COMMUNITY_CHAT_ID`. Узнать: перешли боту сообщение из этого чата (для канала) или временно добавь @RawDataBot в группу.
+
+### 3. Render
+Добавь переменные `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `COMMUNITY_CHAT_ID` → Save → бот перезапустится.
+Google Таблицу менять руками не нужно, но **обнови код Apps Script** из `google_apps_script.gs`
+(Deploy → Manage deployments → ✏️ → New version): появятся колонки `stripe_customer`, `stripe_sub`, `sub_status`.
+
+### 4. Проверка в тестовом режиме
+- Пройди оплату тестовой картой `4242 4242 4242 4242`, любой будущий срок и CVC.
+- Бот должен прислать «Оплата прошла» и кнопку входа; заявка в чат одобряется сама.
+- В Stripe отмени подписку (Subscriptions → Cancel immediately) — бот уберёт тебя из чата.
+- `/stats` показывает, сколько человек сейчас платит.
+
+Бесплатный Render засыпает: первое событие Stripe может не дождаться ответа, пока сервер просыпается (~1 мин).
+Это нормально — Stripe повторяет события сам, доступ придёт с небольшой задержкой.
+
+### 5. Переход на реальные деньги
+В live-режиме Stripe всё заново: продукт и цена, restricted key `rk_live_...`, вебхук с новым `whsec_...`, портал клиента.
+Замени четыре переменные в Render.
+
+### Налоги (Stripe Tax)
+По умолчанию бот налог **не** считает (`STRIPE_AUTOMATIC_TAX=0`). Облагается ли подписка на онлайн-обучение
+налогом с продаж и в каких штатах — вопрос к налоговому консультанту. Если нужно собирать налог:
+1. **Tax → Settings**: адрес компании (head office) и налоговый код продукта (выбрать из списка Stripe — [Tax codes](https://docs.stripe.com/tax/tax-codes)), у цены — `tax behavior` (цена с налогом или без).
+2. **Tax → Locations → Add registration** — только для штатов, где ты реально зарегистрирован как плательщик.
+   Без регистрации Stripe налог не возьмёт и ошибку не покажет.
+3. Поставь `STRIPE_AUTOMATIC_TAX=1` в Render.
+
 ## Команды админа
 - `/stats` — сколько пришло, подписалось, где отваливаются, сколько дошло до оффера
 - `/broadcast текст` или ответом на сообщение — рассылка всем
@@ -61,3 +121,5 @@
 ## Команды ученика
 - `/start` — начать или узнать прогресс
 - `/lessons` — заново получить открытые уроки
+- `/join` — оплатить и вступить в сообщество
+- `/subscription` — статус подписки, смена карты, отмена
