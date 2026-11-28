@@ -87,7 +87,7 @@ Stripe сообщает боту об оплате через вебхук, бо
 - ID чата (`-100...`) → `COMMUNITY_CHAT_ID`. Узнать: перешли боту сообщение из этого чата (для канала) или временно добавь @RawDataBot в группу.
 
 ### 3. Render
-Добавь переменные `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `COMMUNITY_CHAT_ID` → Save → бот перезапустится.
+Добавь переменные `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `COMMUNITY_CHAT_ID` (ID цены уже вписан в `bot.py`; `STRIPE_PRICE_ID` нужен, только если цена поменяется) → Save → бот перезапустится.
 Google Таблицу менять руками не нужно, но **обнови код Apps Script** из `google_apps_script.gs`
 (Deploy → Manage deployments → ✏️ → New version): появятся колонки `stripe_customer`, `stripe_sub`, `sub_status`.
 

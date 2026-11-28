@@ -52,7 +52,7 @@ REMIND_MAX_AGE_H = 72   # тем, кто пришёл больше 3 дней н
 # Если STRIPE_SECRET_KEY не задан, бот работает как раньше: кнопка оффера ведёт на button_url.
 STRIPE_KEY = os.getenv("STRIPE_SECRET_KEY")              # лучше restricted key (rk_...), см. README
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")   # whsec_... из Dashboard → Webhooks
-STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")           # price_... подписки $50/мес
+STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID") or "price_1Ugfep0wPg45kAxpEGqiGnk3"   # подписка $50/мес
 COMMUNITY_CHAT_ID = os.getenv("COMMUNITY_CHAT_ID")       # закрытый чат/канал сообщества (-100...)
 STRIPE_AUTOMATIC_TAX = os.getenv("STRIPE_AUTOMATIC_TAX", "0") == "1"  # включать только после настройки Stripe Tax
 PRICE_LABEL = os.getenv("PRICE_LABEL", "$50 в месяц")   # текст на кнопке оплаты
