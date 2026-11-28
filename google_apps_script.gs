@@ -16,6 +16,9 @@ const SHEET = 'users';
 const FIELDS = ['user_id', 'username', 'first_name', 'joined_at', 'started_at',
                 'next_lesson', 'paused', 'offer_sent', 'blocked', 'reminded', 'source'];
 const EXTRA = ['Пришёл', 'Начал курс', 'Уроков получено', 'Статус']; // для тебя, бот их не читает
+// Поля оплаты (Stripe) — в конце строки, после колонок EXTRA, чтобы старые строки не съехали
+const PAY_FIELDS = ['stripe_customer', 'stripe_sub', 'sub_status'];
+const PAY_COL = FIELDS.length + EXTRA.length; // с какой колонки (0 = A) начинаются поля оплаты
 
 function sheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -25,6 +28,11 @@ function sheet_() {
     sh.appendRow(FIELDS.concat(EXTRA));
     sh.setFrozenRows(1);
     sh.getRange(1, 1, 1, FIELDS.length + EXTRA.length).setFontWeight('bold');
+  }
+  // старая таблица без колонок оплаты — дописываем заголовки
+  const head = sh.getRange(1, PAY_COL + 1, 1, PAY_FIELDS.length);
+  if (String(head.getValues()[0][0]) !== PAY_FIELDS[0]) {
+    head.setValues([PAY_FIELDS]).setFontWeight('bold');
   }
   return sh;
 }
@@ -47,6 +55,7 @@ function doPost(e) {
       const users = values.slice(1).map(r => {
         const o = {};
         FIELDS.forEach((f, i) => o[f] = r[i]);
+        PAY_FIELDS.forEach((f, i) => o[f] = r[PAY_COL + i]);
         return o;
       });
       return json_({ok: true, users: users});
@@ -55,9 +64,11 @@ function doPost(e) {
       const u = req.user;
       const row = FIELDS.map(f => (u[f] === null || u[f] === undefined) ? '' : u[f]);
       const toDate = t => t ? new Date(Number(t) * 1000) : '';
-      const status = u.blocked ? 'заблокировал бота' : u.offer_sent ? 'получил оффер'
+      const paid = (u.sub_status === 'active' || u.sub_status === 'trialing') ? 'в сообществе (платит)' : '';
+      const status = paid ? paid : u.blocked ? 'заблокировал бота' : u.offer_sent ? 'получил оффер'
                    : u.paused ? 'отписался, пауза' : u.started_at ? 'проходит курс' : 'не подписался';
-      const full = row.concat([toDate(u.joined_at), toDate(u.started_at), u.next_lesson || 0, status]);
+      const pay = PAY_FIELDS.map(f => (u[f] === null || u[f] === undefined) ? '' : u[f]);
+      const full = row.concat([toDate(u.joined_at), toDate(u.started_at), u.next_lesson || 0, status], pay);
 
       const ids = sh.getRange(1, 1, Math.max(sh.getLastRow(), 1), 1).getValues().map(r => String(r[0]));
       const idx = ids.indexOf(String(u.user_id));

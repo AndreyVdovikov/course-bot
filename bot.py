@@ -26,9 +26,10 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
+from aiogram.types import (CallbackQuery, ChatJoinRequest, InlineKeyboardButton, InlineKeyboardMarkup,
                            Message, MessageOriginChannel)
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+import stripe
 from aiohttp import web
 from dotenv import load_dotenv
 
@@ -47,6 +48,20 @@ PROTECT = os.getenv("PROTECT_CONTENT", "1") != "0"   # запрет пересы
 REMIND_AFTER_H = float(os.getenv("REMIND_AFTER_HOURS", "2"))  # напомнить про подписку через N часов
 REMIND_MAX_AGE_H = 72   # тем, кто пришёл больше 3 дней назад, не напоминаем
 
+# ---------- оплата сообщества (Stripe) ----------
+# Если STRIPE_SECRET_KEY не задан, бот работает как раньше: кнопка оффера ведёт на button_url.
+STRIPE_KEY = os.getenv("STRIPE_SECRET_KEY")              # лучше restricted key (rk_...), см. README
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")   # whsec_... из Dashboard → Webhooks
+STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID") or "price_1Ugfep0wPg45kAxpEGqiGnk3"   # подписка $50/мес
+COMMUNITY_CHAT_ID = os.getenv("COMMUNITY_CHAT_ID")       # закрытый чат/канал сообщества (-100...)
+STRIPE_AUTOMATIC_TAX = os.getenv("STRIPE_AUTOMATIC_TAX", "0") == "1"  # включать только после настройки Stripe Tax
+PRICE_LABEL = os.getenv("PRICE_LABEL", "$50 в месяц")   # текст на кнопке оплаты
+PAYMENTS_ON = bool(STRIPE_KEY and STRIPE_PRICE_ID and COMMUNITY_CHAT_ID)
+CHECKOUT_LABEL = "tg_community_kqwhzmra"   # integration_identifier: метка потока оплаты в Dashboard
+ACTIVE_STATUSES = {"active", "trialing"}
+GRACE_STATUSES = {"past_due"}               # оплата не прошла, Stripe ещё пробует списать — доступ оставляем
+END_STATUSES = {"canceled", "unpaid", "incomplete_expired", "paused"}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
 
@@ -59,7 +74,8 @@ COURSE = load_course()
 
 # ---------- хранилище: Google Таблица ----------
 FIELDS = ["user_id", "username", "first_name", "joined_at", "started_at",
-          "next_lesson", "paused", "offer_sent", "blocked", "reminded", "source"]
+          "next_lesson", "paused", "offer_sent", "blocked", "reminded", "source",
+          "stripe_customer", "stripe_sub", "sub_status"]
 INT_FIELDS = {"user_id", "joined_at", "started_at", "next_lesson", "paused", "offer_sent", "blocked", "reminded"}
 USERS: dict[int, dict] = {}   # копия таблицы в памяти, грузится при каждом старте сервера
 http: aiohttp.ClientSession | None = None
@@ -109,7 +125,8 @@ async def add_user(uid, username, first_name, source=None):
     USERS[uid] = {"user_id": uid, "username": username, "first_name": first_name,
                   "joined_at": int(time.time()), "started_at": None, "next_lesson": 0,
                   "paused": 0, "offer_sent": 0, "blocked": 0, "reminded": 0,
-                  "source": source or "direct"}
+                  "source": source or "direct",
+                  "stripe_customer": None, "stripe_sub": None, "sub_status": None}
     await sheet_call({"action": "upsert", "user": USERS[uid]})
 
 # ---------- тексты и кнопки ----------
@@ -186,7 +203,11 @@ def needs_source_question(u) -> bool:
 
 def offer_kb():
     o = COURSE["final_offer"]
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=o["button_text"], url=o["button_url"])]])
+    if PAYMENTS_ON:   # оплата через бота: кнопка создаёт личную ссылку Stripe Checkout
+        btn = InlineKeyboardButton(text=o["button_text"], callback_data="join")
+    else:
+        btn = InlineKeyboardButton(text=o["button_text"], url=o["button_url"])
+    return InlineKeyboardMarkup(inline_keyboard=[[btn]])
 
 # ---------- логика курса ----------
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -299,6 +320,9 @@ def clean_source(raw: str | None) -> str | None:
 @dp.message(CommandStart())
 async def on_start(msg: Message, command: CommandObject):
     uid = msg.from_user.id
+    if command.args == "paid":   # вернулся со страницы оплаты Stripe
+        await on_paid_return(msg)
+        return
     u = get_user(uid)
     if not u:
         await add_user(uid, msg.from_user.username, msg.from_user.first_name, clean_source(command.args))
@@ -380,6 +404,269 @@ async def on_lessons(msg: Message):
         await send_lesson(msg.from_user.id, i)
         await asyncio.sleep(0.5)
 
+# ---------- платное сообщество: оплата через Stripe ----------
+# Как это работает:
+# 1. Человек жмёт «Хочу в сообщество» (или /join) -> бот создаёт для него ссылку Stripe Checkout.
+# 2. Stripe присылает событие на /stripe/webhook -> бот записывает подписку в таблицу
+#    и присылает кнопку входа в закрытый чат (заявка на вступление, бот одобряет только оплативших).
+# 3. Подписка закончилась / не оплачена -> бот убирает человека из чата.
+# Доступ выдаётся ТОЛЬКО по событиям Stripe (страница «спасибо» ничего не решает).
+stripe_client: "stripe.StripeClient | None" = None
+BOT_USERNAME = ""
+PROCESSED_EVENTS: set[str] = set()   # повторная доставка одного события не выдаёт доступ дважды
+
+CHECKOUT_TEXT = ("Отлично! Вот твоя личная ссылка на оплату 👇\n\n"
+                 "После оплаты я сразу пришлю сюда кнопку входа в закрытое сообщество. "
+                 "Отменить подписку можно в любой момент командой /subscription.")
+PAID_WELCOME = ("Оплата прошла, добро пожаловать в сообщество! 🎉\n\n"
+                "Жми кнопку ниже и отправь заявку на вступление — я одобрю её автоматически.\n"
+                "Управлять подпиской (карта, отмена) — /subscription")
+ALREADY_MEMBER = "Ты уже в сообществе 👍 Если вышел из чата — вот кнопка, чтобы вернуться."
+PAID_PENDING = ("Спасибо! Платёж обрабатывается — кнопка входа придёт сюда в течение пары минут. "
+                "Если за 10 минут ничего не пришло, напиши мне.")
+NO_ACCESS = ("Вход в сообщество — для участников с активной подпиской. "
+             "Оформить её можно здесь 👇")
+PAYMENT_FAILED = ("Не получилось списать оплату за сообщество 😕 Stripe попробует ещё раз через несколько дней. "
+                  "Проверь карту по кнопке ниже, чтобы доступ не закрылся.")
+ACCESS_ENDED = ("Подписка на сообщество закончилась, поэтому доступ к чату закрыт. "
+                "Вернуться можно в любой момент 👇")
+CHECKOUT_FAILED = "Не получилось создать ссылку на оплату. Попробуй через пару минут или напиши мне."
+
+def has_access(u) -> bool:
+    return bool(u) and u.get("sub_status") in (ACTIVE_STATUSES | GRACE_STATUSES)
+
+def find_user(field: str, value):
+    if not value:
+        return None
+    return next((u for u in USERS.values() if u.get(field) == value), None)
+
+def sget(obj, *path):
+    """Достать вложенное поле из объекта Stripe, не падая, если его нет."""
+    cur = obj
+    for key in path:
+        if cur is None:
+            return None
+        try:
+            cur = cur[key]
+        except (KeyError, TypeError, AttributeError):
+            return None
+    return cur
+
+def obj_id(x):
+    """Поле Stripe бывает строкой-ID или развёрнутым объектом."""
+    return x if isinstance(x, str) or x is None else sget(x, "id")
+
+def join_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=COURSE["final_offer"]["button_text"], callback_data="join")]])
+
+async def notify_admins(text: str):
+    for aid in ADMIN_IDS:
+        try:
+            await bot.send_message(aid, text)
+        except Exception:
+            log.warning("Не смог написать админу %s", aid)
+
+async def safe_send(uid: int, text: str, reply_markup=None):
+    try:
+        await bot.send_message(uid, text, reply_markup=reply_markup)
+    except TelegramForbiddenError:
+        if get_user(uid):
+            await upd(uid, blocked=1)
+
+async def ensure_user(uid: int, username=None, first_name=None, source="join") -> dict:
+    if not get_user(uid):
+        await add_user(uid, username, first_name, source)
+    return get_user(uid)
+
+async def invite_kb():
+    """Ссылка в закрытый чат с заявкой на вступление: даже если её перешлют, бот пустит только оплативших."""
+    link = await bot.create_chat_invite_link(COMMUNITY_CHAT_ID, creates_join_request=True)
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔓 Войти в сообщество", url=link.invite_link)]])
+
+async def portal_kb(u):
+    s = await stripe_client.v1.billing_portal.sessions.create_async(params={
+        "customer": u["stripe_customer"],
+        "return_url": f"https://t.me/{BOT_USERNAME}",
+    })
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="💳 Управлять подпиской", url=s.url)]])
+
+async def send_checkout(uid: int, username=None, first_name=None):
+    if not PAYMENTS_ON:
+        await safe_send(uid, "Оплата скоро появится — напиши мне, и я пришлю ссылку.")
+        return
+    u = await ensure_user(uid, username, first_name)
+    if has_access(u):
+        await safe_send(uid, ALREADY_MEMBER, await invite_kb())
+        return
+    params = {
+        "mode": "subscription",
+        "line_items": [{"price": STRIPE_PRICE_ID, "quantity": 1}],
+        "client_reference_id": str(uid),                       # по нему находим человека в вебхуке
+        "subscription_data": {"metadata": {"telegram_id": str(uid)}},   # запасной способ
+        "success_url": f"https://t.me/{BOT_USERNAME}?start=paid",
+        "cancel_url": f"https://t.me/{BOT_USERNAME}",
+        "integration_identifier": CHECKOUT_LABEL,
+    }
+    if u.get("stripe_customer"):          # уже платил раньше — тот же клиент в Stripe
+        params["customer"] = u["stripe_customer"]
+    if STRIPE_AUTOMATIC_TAX:
+        params["automatic_tax"] = {"enabled": True}
+        if u.get("stripe_customer"):
+            params["customer_update"] = {"address": "auto"}
+            params["billing_address_collection"] = "required"
+    try:
+        session = await stripe_client.v1.checkout.sessions.create_async(params=params)
+    except stripe.StripeError as e:
+        log.error("Stripe Checkout не создан для %s: %s", uid, e)
+        await safe_send(uid, CHECKOUT_FAILED)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"💳 Оплатить {PRICE_LABEL}", url=session.url)]])
+    await safe_send(uid, CHECKOUT_TEXT, kb)
+
+async def grant_access(uid: int):
+    await safe_send(uid, PAID_WELCOME, await invite_kb())
+
+async def revoke_access(uid: int):
+    try:   # бан + сразу разбан = просто убрать из чата, вернуться можно после новой оплаты
+        await bot.ban_chat_member(COMMUNITY_CHAT_ID, uid)
+        await bot.unban_chat_member(COMMUNITY_CHAT_ID, uid, only_if_banned=True)
+    except TelegramBadRequest as e:
+        log.warning("Не смог убрать %s из сообщества: %s", uid, e)
+    await safe_send(uid, ACCESS_ENDED, join_kb())
+
+async def apply_status(uid: int, sub_id: str, customer: str, status: str):
+    """Записать новый статус подписки и открыть/закрыть доступ, если он поменялся."""
+    u = get_user(uid)
+    old = u.get("sub_status")
+    await upd(uid, stripe_sub=sub_id, stripe_customer=customer or u.get("stripe_customer"), sub_status=status)
+    if status in END_STATUSES and old not in END_STATUSES and old is not None:
+        await revoke_access(uid)
+        await notify_admins(f"👋 Подписка закончилась ({status}): {user_label(u)}")
+    elif status in ACTIVE_STATUSES and old in END_STATUSES:
+        await grant_access(uid)
+
+def user_label(u) -> str:
+    name = html.escape(u.get("first_name") or "")
+    un = f" @{u['username']}" if u.get("username") else ""
+    return f"{name}{un} (id <code>{u['user_id']}</code>)"
+
+async def sync_subscription(sub_id: str, deleted_obj=None):
+    """Берём свежую подписку из Stripe (события могут прийти не по порядку) и применяем её статус."""
+    if deleted_obj is not None:
+        sub, status = deleted_obj, "canceled"
+    else:
+        sub = await stripe_client.v1.subscriptions.retrieve_async(sub_id)
+        status = sub.status
+    u = find_user("stripe_sub", sub_id)
+    if not u:
+        tid = sget(sub, "metadata", "telegram_id")
+        u = get_user(int(tid)) if tid and str(tid).isdigit() else None
+    if not u or u.get("stripe_sub") not in (None, sub_id):
+        return   # подписку ещё не записал checkout.session.completed — он всё сделает сам
+    if u.get("sub_status") is None:
+        return
+    await apply_status(u["user_id"], sub_id, obj_id(sget(sub, "customer")), status)
+
+async def handle_stripe_event(event):
+    t = event.type
+    obj = event.data.object
+    if t in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
+        if sget(obj, "mode") != "subscription" or sget(obj, "payment_status") == "unpaid":
+            return   # оплата ещё не прошла (отложенные способы) — ждём async_payment_succeeded
+        ref = sget(obj, "client_reference_id") or ""
+        if not ref.isdigit():
+            await notify_admins(f"⚠️ Оплата без Telegram-ID, сессия <code>{obj.id}</code> — проверь в Stripe")
+            return
+        uid = int(ref)
+        u = await ensure_user(uid, source="stripe")
+        sub_id, customer = obj_id(sget(obj, "subscription")), obj_id(sget(obj, "customer"))
+        if has_access(u) and u.get("stripe_sub") not in (None, sub_id):
+            await notify_admins(f"⚠️ У {user_label(u)} уже была активная подписка <code>{u['stripe_sub']}</code>, "
+                                f"а сейчас оплачена ещё одна <code>{sub_id}</code>. Проверь в Stripe, лишнюю отмени.")
+        await upd(uid, stripe_customer=customer, stripe_sub=sub_id, sub_status="active")
+        await grant_access(uid)
+        await notify_admins(f"💰 Новый участник сообщества: {user_label(get_user(uid))}")
+    elif t == "customer.subscription.updated":
+        await sync_subscription(obj.id)
+    elif t == "customer.subscription.deleted":
+        await sync_subscription(obj.id, deleted_obj=obj)
+    elif t == "invoice.paid":
+        sub_id = obj_id(sget(obj, "parent", "subscription_details", "subscription"))
+        if sub_id:
+            await sync_subscription(sub_id)
+    elif t == "invoice.payment_failed":
+        u = find_user("stripe_customer", obj_id(sget(obj, "customer")))
+        if u:
+            await safe_send(u["user_id"], PAYMENT_FAILED, await portal_kb(u))
+            await notify_admins(f"⚠️ Не прошла оплата: {user_label(u)}")
+    elif t in ("charge.refunded", "charge.dispute.created", "radar.early_fraud_warning.created"):
+        what = {"charge.refunded": "💸 Возврат", "charge.dispute.created": "🚨 Спор по платежу (chargeback)",
+                "radar.early_fraud_warning.created": "🚨 Предупреждение о мошенничестве"}[t]
+        u = find_user("stripe_customer", obj_id(sget(obj, "customer")))
+        who = user_label(u) if u else "клиент не найден в таблице"
+        await notify_admins(f"{what}: {who}\nОбъект <code>{obj.id}</code> — разберись в Stripe Dashboard. "
+                            "Доступ к чату бот сам не трогает.")
+
+async def stripe_webhook(request: web.Request):
+    if not (PAYMENTS_ON and STRIPE_WEBHOOK_SECRET):
+        return web.Response(status=404, text="payments off")
+    payload = await request.read()
+    try:
+        event = stripe_client.construct_event(payload, request.headers.get("Stripe-Signature"),
+                                              STRIPE_WEBHOOK_SECRET)
+    except (ValueError, stripe.SignatureVerificationError):
+        return web.Response(status=400, text="bad signature")
+    if event.id in PROCESSED_EVENTS:
+        return web.Response(text="duplicate")
+    try:
+        await handle_stripe_event(event)
+    except Exception:
+        log.exception("Ошибка обработки события Stripe %s (%s)", event.id, event.type)
+        return web.Response(status=500, text="error")   # Stripe пришлёт событие повторно
+    PROCESSED_EVENTS.add(event.id)
+    return web.Response(text="ok")
+
+@dp.callback_query(F.data == "join")
+async def on_join_button(cb: CallbackQuery):
+    await cb.answer()
+    await send_checkout(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+
+@dp.message(Command("join"))
+async def on_join_cmd(msg: Message):
+    await send_checkout(msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
+
+async def on_paid_return(msg: Message):
+    u = get_user(msg.from_user.id)
+    if PAYMENTS_ON and has_access(u):
+        await msg.answer(ALREADY_MEMBER, reply_markup=await invite_kb())
+    else:
+        await msg.answer(PAID_PENDING)
+
+@dp.message(Command("subscription"))
+async def on_subscription(msg: Message):
+    u = get_user(msg.from_user.id)
+    if not PAYMENTS_ON or not u or not u.get("stripe_customer"):
+        await msg.answer("У тебя пока нет подписки на сообщество.", reply_markup=join_kb() if PAYMENTS_ON else None)
+        return
+    status = {"active": "активна ✅", "trialing": "пробный период ✅", "past_due": "оплата не прошла ⚠️"}.get(
+        u.get("sub_status"), "не активна")
+    await msg.answer(f"Подписка на сообщество: {status}\nКарта, чеки и отмена — по кнопке:",
+                     reply_markup=await portal_kb(u))
+
+@dp.chat_join_request()
+async def on_join_request(req: ChatJoinRequest):
+    if not PAYMENTS_ON or str(req.chat.id) != str(COMMUNITY_CHAT_ID):
+        return
+    if has_access(get_user(req.from_user.id)):
+        await req.approve()
+    else:
+        await req.decline()
+        await safe_send(req.from_user.id, NO_ACCESS, join_kb())
+
 # ---------- команды админа ----------
 def is_admin(msg: Message):
     return msg.from_user.id in ADMIN_IDS
@@ -394,7 +681,8 @@ async def on_stats(msg: Message):
              f"↩️ Подписались после напоминания: {cnt(lambda u: u['reminded'] and u['started_at'])}",
              f"⏸ На паузе (отписались): {cnt(lambda u: u['paused'])}",
              f"🚫 Заблокировали бота: {cnt(lambda u: u['blocked'])}",
-             f"💰 Дошли до оффера: {cnt(lambda u: u['offer_sent'])}", "", "Получили уроков:"]
+             f"💰 Дошли до оффера: {cnt(lambda u: u['offer_sent'])}",
+             f"💳 В сообществе сейчас (платят): {cnt(has_access)}", "", "Получили уроков:"]
     for i in range(len(COURSE["lessons"])):
         lines.append(f"  {i + 1}. {cnt(lambda u: u['next_lesson'] > i)}")
     by_src: dict[str, list] = {}
@@ -466,22 +754,32 @@ async def health(request):
     return web.Response(text="bot is running")
 
 async def on_startup(app):
-    global http
+    global http, stripe_client, BOT_USERNAME
     http = aiohttp.ClientSession()
     await load_users()
+    BOT_USERNAME = (await bot.get_me()).username
+    if PAYMENTS_ON:
+        stripe_client = stripe.StripeClient(STRIPE_KEY, http_client=stripe.AIOHTTPClient(), max_network_retries=2)
+        log.info("Оплата через Stripe включена (%s)", "test" if "_test_" in STRIPE_KEY else "LIVE")
     if PUBLIC_URL:
         await bot.set_webhook(f"{PUBLIC_URL}/webhook", secret_token=SECRET,
-                              allowed_updates=["message", "callback_query"])
+                              allowed_updates=["message", "callback_query", "chat_join_request"])
         log.info("Webhook: %s/webhook", PUBLIC_URL)
     asyncio.create_task(deliver_all())   # после пробуждения сразу проверяем, кому пора
 
 async def on_shutdown(app):
     await http.close()
+    if stripe_client:
+        try:
+            await stripe_client._requestor._client.close_async()   # закрыть HTTP-сессию Stripe
+        except Exception:
+            pass
 
 def main():
     app = web.Application()
     app.router.add_get("/", health)
     app.router.add_get("/tick", tick)
+    app.router.add_post("/stripe/webhook", stripe_webhook)
     SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=SECRET).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
     app.on_startup.append(on_startup)
